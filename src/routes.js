@@ -218,6 +218,7 @@ router.get("/status", async (req, res) => {
     session: {
       existsInDB: dbSession.exists,
       lastModified: dbSession.lastModified,
+      collection: dbSession.collection,
     },
     message: clientReady
       ? "WhatsApp client is connected and ready."

@@ -126,27 +126,25 @@ async function initialize(store) {
   client = new Client({
     authStrategy: new RemoteAuth({
       store,
-      backupSyncIntervalMs: 300000, // Backup session to MongoDB every 5 minutes
       // ═══════════════════════════════════════════════════════════
-      // CRITICAL FIX: Redirect RemoteAuth.zip to writable /tmp
+      // CRITICAL: backupSyncIntervalMs controls how quickly the
+      // session is first saved to MongoDB after authentication.
       //
-      // Without this, RemoteAuth tries to write the zip file to
-      // the project root directory, which is READ-ONLY on cloud
-      // containers (Railway, Render). This causes:
-      //   Error: ENOENT: no such file or directory, open 'RemoteAuth.zip'
-      //
-      // By setting dataPath to our writable temp dir, the zip file
-      // is created, read, and deleted safely inside /tmp.
+      // Previously set to 300000 (5 min), which meant the session
+      // was NEVER saved if Railway recycled the container within
+      // 5 minutes. Reduced to 60 seconds for aggressive persistence.
       // ═══════════════════════════════════════════════════════════
+      backupSyncIntervalMs: 60000, // Save session to MongoDB every 60 seconds
       dataPath: path.join(config.dataDir, "session-data"),
     }),
     puppeteer: puppeteerConfig,
-    // Redirect whatsapp-web.js internal data (webVersion cache etc.)
-    // to the writable directory as well.
     webVersionCache: {
-      type: "none", // Disable web version caching to avoid filesystem writes
+      type: "none",
     },
   });
+
+  // Track whether the session has been saved to MongoDB
+  let sessionSavedToDB = false;
 
   // ── QR Code Event ──
   client.on("qr", (qr) => {
@@ -156,20 +154,60 @@ async function initialize(store) {
 
   // ── Authenticated ──
   client.on("authenticated", () => {
-    log.info("Client authenticated successfully");
+    log.info("══════════════════════════════════════════");
+    log.info("  AUTH EVENT FIRED — Client authenticated");
+    log.info("══════════════════════════════════════════");
+    log.info("Waiting for RemoteAuth to save session to MongoDB...");
+    log.info(`backupSyncIntervalMs = 60000 (first save within ~60s)`);
     latestQR = null;
+
+    // ── Fallback save verification timer ──
+    // If remote_session_saved doesn't fire within 10 seconds of
+    // the READY event, log an explicit warning so we can diagnose
+    // whether MongoDB is actually receiving the session payload.
+    setTimeout(async () => {
+      if (!sessionSavedToDB) {
+        log.warn("══════════════════════════════════════════════════════");
+        log.warn("  WARNING: remote_session_saved has NOT fired yet!");
+        log.warn("  The session may not have been written to MongoDB.");
+        log.warn("══════════════════════════════════════════════════════");
+
+        // Query MongoDB directly to check
+        const { verifySessionInDB } = require("./store");
+        const result = await verifySessionInDB();
+        if (result.exists) {
+          log.info("DB check: Session DOES exist in MongoDB (may have been saved by a previous run)");
+        } else {
+          log.error("DB check: Session does NOT exist in MongoDB!");
+          log.error("RemoteAuth is failing to write the session. Possible causes:");
+          log.error("  1. MongoDB Atlas network timeout or auth failure");
+          log.error("  2. The whatsapp-sessions collection cannot be written to");
+          log.error("  3. The dataPath directory is not writable for zip creation");
+          log.error(`  4. Current dataPath: ${path.join(config.dataDir, "session-data")}`);
+        }
+      }
+    }, 10000);
   });
 
   // ── Remote Session Saved ──
-  // Fires when RemoteAuth successfully writes the session to MongoDB.
+  // This is the CRITICAL event — it fires when RemoteAuth has
+  // successfully compressed and uploaded the session to MongoDB.
   client.on("remote_session_saved", () => {
-    log.info("Session token written to MongoDB successfully");
+    sessionSavedToDB = true;
+    log.info("══════════════════════════════════════════════════════");
+    log.info("  SESSION SAVED — Token written to MongoDB Atlas ✓");
+    log.info("══════════════════════════════════════════════════════");
+    log.info("Session will persist across container restarts.");
   });
 
   // ── Authentication Failure ──
   client.on("auth_failure", (message) => {
-    log.error(`Authentication failed: ${message}`);
+    log.error("══════════════════════════════════════════");
+    log.error("  AUTH FAILURE — Session was NOT saved");
+    log.error(`  Reason: ${message}`);
+    log.error("══════════════════════════════════════════");
     isReady = false;
+    sessionSavedToDB = false;
   });
 
   // ── Ready ──
