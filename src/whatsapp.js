@@ -107,8 +107,9 @@ async function initialize(store) {
   const puppeteerConfig = {
     headless: true,
     args: puppeteerArgs,
-    // Redirect Puppeteer user data to the writable temp directory
-    userDataDir: path.join(config.dataDir, "puppeteer-cache"),
+    // NOTE: Do NOT set userDataDir here — RemoteAuth is incompatible
+    // with a user-supplied userDataDir. It manages its own session
+    // directory internally via the dataPath option in RemoteAuth config.
   };
 
   // Use custom Chrome path if provided (for local dev),
@@ -121,7 +122,6 @@ async function initialize(store) {
   }
 
   log.info(`Data directory: ${config.dataDir}`);
-  log.info(`Puppeteer cache: ${puppeteerConfig.userDataDir}`);
 
   client = new Client({
     authStrategy: new RemoteAuth({
