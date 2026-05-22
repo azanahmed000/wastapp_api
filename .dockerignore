@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.env
+.wwebjs_auth
+.wwebjs_cache
+logs
+.git
+.gitignore
+README.md
+start.bat
+*.md
