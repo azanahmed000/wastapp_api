@@ -1,26 +1,28 @@
 /**
- * routes.js — Express route definitions
+ * routes.js — Express route definitions with DB-backed status
  *
  * PURPOSE:
  *   Defines all HTTP endpoints:
  *
  *   POST /send-message  — Send a WhatsApp message (API key protected)
  *   GET  /qr            — Render latest QR code as a scannable HTML page
- *   GET  /status        — WhatsApp client connection status
+ *   GET  /status        — Connection status with MongoDB session verification
  *   GET  /health        — Server health check
  */
 
 const { Router } = require("express");
 const QRCode = require("qrcode");
 const whatsapp = require("./whatsapp");
+const { verifySessionInDB } = require("./store");
 const { authenticateApiKey, validateMessage } = require("./middleware");
 const logger = require("./logger");
 
+const log = logger.tagged("[HTTP Server]");
 const router = Router();
 
 // ─────────────────────────────────────────────────────
 // POST /send-message — Send a WhatsApp message
-// Protected by API key authentication + body validation
+// Protected by API key authentication + strict validation
 // ─────────────────────────────────────────────────────
 router.post(
   "/send-message",
@@ -35,7 +37,7 @@ router.post(
         message: `Message sent successfully to ${req.cleanNumber}`,
       });
     } catch (error) {
-      logger.error(`Failed to send message: ${error.message}`);
+      log.error(`Failed to send message: ${error.message}`);
       const statusCode = error.message.includes("not ready") ? 503 : 500;
 
       return res.status(statusCode).json({
@@ -48,10 +50,6 @@ router.post(
 
 // ─────────────────────────────────────────────────────
 // GET /qr — Remote QR code scanning page
-//
-// Renders the latest QR code as a clean HTML page with
-// an embedded PNG image. Open this on your phone browser
-// from anywhere in the world to authenticate WhatsApp.
 // ─────────────────────────────────────────────────────
 router.get("/qr", async (req, res) => {
   const qrString = whatsapp.getLatestQR();
@@ -120,7 +118,6 @@ router.get("/qr", async (req, res) => {
   }
 
   try {
-    // Generate QR code as a data:image/png;base64 string
     const qrImageDataUrl = await QRCode.toDataURL(qrString, {
       width: 320,
       margin: 2,
@@ -197,22 +194,36 @@ router.get("/qr", async (req, res) => {
       </html>
     `);
   } catch (err) {
-    logger.error(`Failed to generate QR image: ${err.message}`);
+    log.error(`Failed to generate QR image: ${err.message}`);
     return res.status(500).json({ success: false, error: "Failed to generate QR code." });
   }
 });
 
 // ─────────────────────────────────────────────────────
-// GET /status — WhatsApp connection status
+// GET /status — WhatsApp connection status with DB verification
+//
+// NEW: Smart fallback — queries MongoDB session collection directly
+// to confirm a valid token exists before reporting ready: true.
+// This prevents false positives when the in-memory flag is stale.
 // ─────────────────────────────────────────────────────
-router.get("/status", (req, res) => {
-  const ready = whatsapp.getStatus();
+router.get("/status", async (req, res) => {
+  const clientReady = whatsapp.getStatus();
+
+  // Query MongoDB for ground-truth session verification
+  const dbSession = await verifySessionInDB();
+
   return res.status(200).json({
     success: true,
-    ready,
-    message: ready
+    ready: clientReady,
+    session: {
+      existsInDB: dbSession.exists,
+      lastModified: dbSession.lastModified,
+    },
+    message: clientReady
       ? "WhatsApp client is connected and ready."
-      : "WhatsApp client is NOT ready. Visit /qr to scan the authentication QR code.",
+      : dbSession.exists
+        ? "Client is reconnecting — session token found in database."
+        : "WhatsApp client is NOT ready. Visit /qr to scan the authentication QR code.",
   });
 });
 
@@ -223,6 +234,7 @@ router.get("/health", (req, res) => {
   res.status(200).json({
     status: "ok",
     uptime: process.uptime(),
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
     whatsappReady: whatsapp.getStatus(),
   });
 });

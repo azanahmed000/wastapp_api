@@ -1,20 +1,21 @@
 /**
- * bridge.js — Application entry point (cloud-ready)
+ * bridge.js — Application entry point (cloud-hardened)
  *
  * PURPOSE:
  *   Boots the entire application in the correct order:
- *     1. Validates environment variables
- *     2. Connects to MongoDB Atlas
- *     3. Initializes WhatsApp client with RemoteAuth
- *     4. Starts the Express HTTP server
- *     5. Registers graceful shutdown handlers
+ *     1. Registers process lifecycle handlers (MUST be first)
+ *     2. Validates environment variables
+ *     3. Connects to MongoDB Atlas
+ *     4. Initializes WhatsApp client with RemoteAuth
+ *     5. Starts the Express HTTP server
+ *
+ *   STABILITY:
+ *     Global uncaughtException and unhandledRejection handlers
+ *     prevent unexpected errors from hard-crashing the container.
+ *     The process logs the error and continues running instead of
+ *     triggering an immediate restart loop.
  *
  *   This file contains NO business logic — only orchestration.
- *
- * DEPLOYMENT:
- *   Works on Render, Railway, Fly.io, or any Docker host.
- *   Set environment variables in the cloud provider's dashboard:
- *     MONGODB_URI, BOT_API_KEY, PORT (auto-set by most platforms)
  */
 
 const express = require("express");
@@ -24,33 +25,77 @@ const { connectAndCreateStore } = require("./src/store");
 const whatsapp = require("./src/whatsapp");
 const routes = require("./src/routes");
 
+const log = logger.tagged("[Bridge]");
+
+// ═══════════════════════════════════════════════════════════
+// PROCESS LIFECYCLE HANDLERS — Must be registered FIRST
+//
+// These prevent the Node.js process from hard-crashing on
+// unexpected errors. On cloud containers, a crash triggers a
+// restart, which triggers a new QR scan, which creates a
+// crash loop. By catching these globally, we log the error
+// and keep the process alive.
+// ═══════════════════════════════════════════════════════════
+
+process.on("uncaughtException", (err) => {
+  log.error(`Uncaught Exception (process survived): ${err.message}`);
+  if (err.stack) {
+    log.error(`Stack trace:\n${err.stack}`);
+  }
+  // DO NOT call process.exit() — let the process continue
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  const message =
+    reason instanceof Error ? reason.message : String(reason);
+  log.error(`Unhandled Rejection (process survived): ${message}`);
+  if (reason instanceof Error && reason.stack) {
+    log.error(`Stack trace:\n${reason.stack}`);
+  }
+  // DO NOT call process.exit() — let the process continue
+});
+
+// Graceful shutdown on SIGINT (Ctrl+C) and SIGTERM (cloud stop)
+process.on("SIGINT", () => {
+  log.info("SIGINT received — shutting down gracefully...");
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  log.info("SIGTERM received — shutting down gracefully...");
+  process.exit(0);
+});
+
+// ═══════════════════════════════════════════════════════════
+// APPLICATION STARTUP
+// ═══════════════════════════════════════════════════════════
+
 async function start() {
   try {
     // ── Step 1: Validate config ──
-    logger.info("Validating environment configuration...");
+    log.info("Validating environment configuration...");
     validateConfig();
-    logger.info("Configuration OK");
+    log.info("Configuration OK");
+    log.info(`Data directory: ${config.dataDir}`);
 
     // ── Step 2: Connect to MongoDB ──
     const store = await connectAndCreateStore();
 
-    // ── Step 3: Initialize WhatsApp with RemoteAuth ──
-    // This runs in the background — the HTTP server starts immediately
-    // so the /qr endpoint is available for scanning even while the
-    // client is still initializing.
-    const whatsappReady = whatsapp.initialize(store);
-
-    // ── Step 4: Start Express server ──
+    // ── Step 3: Start Express server FIRST ──
+    // The HTTP server starts before WhatsApp so the /qr endpoint
+    // is immediately available for scanning during initialization.
     const app = express();
 
     app.use(express.json());
 
-    // Request logger
+    // Request logger with structured tags
     app.use((req, res, next) => {
       const start = Date.now();
       res.on("finish", () => {
         const duration = Date.now() - start;
-        logger.info(`${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms)`);
+        log.info(
+          `${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms)`
+        );
       });
       next();
     });
@@ -66,45 +111,37 @@ async function start() {
       });
     });
 
-    // Global error handler
+    // Global Express error handler
     app.use((err, req, res, _next) => {
-      logger.error(`Unhandled error: ${err.message}`);
+      log.error(`Express error: ${err.message}`);
       res.status(500).json({ success: false, error: "Internal server error" });
     });
 
     app.listen(config.port, "0.0.0.0", () => {
-      logger.info("═══════════════════════════════════════════");
-      logger.info("  WhatsApp Cloud Bridge — ONLINE");
-      logger.info("═══════════════════════════════════════════");
-      logger.info(`  Server:   http://0.0.0.0:${config.port}`);
-      logger.info(`  Env:      ${config.nodeEnv}`);
-      logger.info("  Endpoints:");
-      logger.info(`    POST /send-message  (API key required)`);
-      logger.info(`    GET  /qr            (remote QR scanning)`);
-      logger.info(`    GET  /status        (connection check)`);
-      logger.info(`    GET  /health        (server health)`);
-      logger.info("═══════════════════════════════════════════");
+      log.info("═══════════════════════════════════════════════");
+      log.info("  WhatsApp Cloud Bridge — ONLINE");
+      log.info("═══════════════════════════════════════════════");
+      log.info(`  Server:    http://0.0.0.0:${config.port}`);
+      log.info(`  Env:       ${config.nodeEnv}`);
+      log.info(`  Data dir:  ${config.dataDir}`);
+      log.info("  Endpoints:");
+      log.info("    POST /send-message  (API key required)");
+      log.info("    GET  /qr            (remote QR scanning)");
+      log.info("    GET  /status        (DB-verified status)");
+      log.info("    GET  /health        (server health + memory)");
+      log.info("═══════════════════════════════════════════════");
     });
 
-    // Wait for WhatsApp initialization to complete
-    await whatsappReady;
+    // ── Step 4: Initialize WhatsApp (non-blocking) ──
+    // Runs after the HTTP server so /qr is available during init.
+    await whatsapp.initialize(store);
   } catch (error) {
-    logger.error(`Fatal startup error: ${error.message}`);
+    log.error(`Fatal startup error: ${error.message}`);
+    if (error.stack) {
+      log.error(`Stack trace:\n${error.stack}`);
+    }
     process.exit(1);
   }
 }
-
-// ── Graceful Shutdown ──
-function shutdown(signal) {
-  logger.info(`${signal} received — shutting down gracefully...`);
-  process.exit(0);
-}
-
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-
-process.on("unhandledRejection", (reason) => {
-  logger.error(`Unhandled Rejection: ${reason}`);
-});
 
 start();

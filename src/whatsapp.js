@@ -1,27 +1,33 @@
 /**
- * whatsapp.js — WhatsApp client with RemoteAuth, heartbeat, and QR state
+ * whatsapp.js — WhatsApp client with RemoteAuth, heartbeat, QR state,
+ *               and resource blocking for cloud stability.
  *
  * PURPOSE:
- *   Core WhatsApp integration rewritten for cloud deployment:
+ *   Core WhatsApp integration hardened for production cloud deployment:
  *
- *   1. RemoteAuth + MongoDB: Session persists in Atlas, survives
- *      container restarts and redeployments without re-scanning QR.
+ *   1. RemoteAuth + MongoDB + /tmp: Session persists in Atlas. All temp
+ *      files (RemoteAuth.zip, Puppeteer cache) write to /tmp to avoid
+ *      ENOENT crashes on read-only cloud container filesystems.
  *
- *   2. Anti-idle heartbeat: Pings the browser page context every
- *      15 seconds to prevent cloud platforms from freezing or
- *      killing the headless Chrome process during idle periods.
+ *   2. Anti-idle heartbeat: Pings the browser page context every 15s
+ *      to prevent cloud platforms from freezing the Chrome process.
  *
- *   3. QR state management: Stores the latest QR string in memory
- *      so it can be served via HTTP for remote scanning from any
- *      device, anywhere in the world.
+ *   3. Resource blocking: Intercepts and blocks stylesheets, images,
+ *      fonts, and media from loading inside the headless browser,
+ *      drastically reducing memory usage on free-tier hardware.
  *
- *   4. Cloud-optimized Puppeteer flags: Minimizes memory usage and
- *      prevents crashes on free-tier hardware (512MB RAM).
+ *   4. Cloud-optimized Puppeteer flags: Aggressively stripped for
+ *      minimal RAM footprint on 512MB containers.
  */
 
+const path = require("path");
+const fs = require("fs");
 const { Client, RemoteAuth } = require("whatsapp-web.js");
 const { config } = require("./config");
 const logger = require("./logger");
+
+const log = logger.tagged("[WhatsApp Gateway]");
+const hbLog = logger.tagged("[Heartbeat]");
 
 /** @type {Client|null} */
 let client = null;
@@ -36,93 +42,142 @@ let latestQR = null;
 let heartbeatInterval = null;
 
 /**
+ * Ensure the writable data directory exists.
+ * On cloud containers, /tmp exists but /tmp/whatsapp-bridge might not.
+ */
+function ensureDataDir() {
+  const dirs = [
+    config.dataDir,
+    path.join(config.dataDir, "puppeteer-cache"),
+    path.join(config.dataDir, "session-data"),
+  ];
+
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      log.info(`Created writable directory: ${dir}`);
+    }
+  }
+}
+
+/**
  * Initialize the WhatsApp client with RemoteAuth.
+ * All temp/cache files are redirected to the writable data directory.
  *
  * @param {import('wwebjs-mongo').MongoStore} store — MongoStore instance
  * @returns {Promise<void>}
  */
 async function initialize(store) {
+  // ── Ensure writable directories ──
+  ensureDataDir();
+
   // ── Delay before init ──
   // Prevents IndexedDB lock collisions that occur when the browser
   // starts too quickly after a container restart on cloud Linux.
-  logger.info("Waiting 3s before initialization to prevent IndexedDB lock collisions...");
+  log.info("Waiting 3s before initialization to prevent IndexedDB lock collisions...");
   await new Promise((resolve) => setTimeout(resolve, 3000));
 
   // ── Build Puppeteer args ──
-  // These flags are critical for running headless Chromium on
-  // free-tier cloud containers with limited memory and no GPU.
+  // Aggressively stripped for minimal RAM on free-tier containers.
   const puppeteerArgs = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
-    "--disable-web-security",
     "--disable-dev-shm-usage",
     "--disable-gpu",
+    "--disable-web-security",
     "--disable-extensions",
     "--disable-background-networking",
     "--disable-default-apps",
     "--disable-sync",
+    "--disable-translate",
+    "--disable-domain-reliability",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-ipc-flooding-protection",
     "--no-first-run",
     "--no-zygote",
     "--single-process",
     "--disable-accelerated-2d-canvas",
+    "--disable-software-rasterizer",
+    "--metrics-recording-only",
     "--js-flags=--max-old-space-size=256",
   ];
 
   const puppeteerConfig = {
     headless: true,
     args: puppeteerArgs,
+    // Redirect Puppeteer user data to the writable temp directory
+    userDataDir: path.join(config.dataDir, "puppeteer-cache"),
   };
 
   // Use custom Chrome path if provided (for local dev),
   // otherwise let Puppeteer find the system Chromium (Docker installs it)
   if (config.chromePath) {
     puppeteerConfig.executablePath = config.chromePath;
-    logger.info(`Using Chrome at: ${config.chromePath}`);
+    log.info(`Using Chrome at: ${config.chromePath}`);
   } else {
-    logger.info("Using system Chromium (auto-detected)");
+    log.info("Using system Chromium (auto-detected)");
   }
+
+  log.info(`Data directory: ${config.dataDir}`);
+  log.info(`Puppeteer cache: ${puppeteerConfig.userDataDir}`);
 
   client = new Client({
     authStrategy: new RemoteAuth({
       store,
       backupSyncIntervalMs: 300000, // Backup session to MongoDB every 5 minutes
+      // ═══════════════════════════════════════════════════════════
+      // CRITICAL FIX: Redirect RemoteAuth.zip to writable /tmp
+      //
+      // Without this, RemoteAuth tries to write the zip file to
+      // the project root directory, which is READ-ONLY on cloud
+      // containers (Railway, Render). This causes:
+      //   Error: ENOENT: no such file or directory, open 'RemoteAuth.zip'
+      //
+      // By setting dataPath to our writable temp dir, the zip file
+      // is created, read, and deleted safely inside /tmp.
+      // ═══════════════════════════════════════════════════════════
+      dataPath: path.join(config.dataDir, "session-data"),
     }),
     puppeteer: puppeteerConfig,
+    // Redirect whatsapp-web.js internal data (webVersion cache etc.)
+    // to the writable directory as well.
+    webVersionCache: {
+      type: "none", // Disable web version caching to avoid filesystem writes
+    },
   });
 
   // ── QR Code Event ──
-  // Fires when authentication is needed. Store the QR string
-  // in memory so the /qr HTTP endpoint can render it.
   client.on("qr", (qr) => {
     latestQR = qr;
-    logger.info("QR code received — visit /qr in your browser to scan remotely");
+    log.info("QR code received — visit /qr in your browser to scan remotely");
   });
 
   // ── Authenticated ──
   client.on("authenticated", () => {
-    logger.info("WhatsApp client authenticated successfully");
-    latestQR = null; // Clear QR once authenticated
+    log.info("Client authenticated successfully");
+    latestQR = null;
   });
 
   // ── Remote Session Saved ──
-  // Fires when RemoteAuth successfully saves the session to MongoDB.
-  // This is critical — without handling this event, the session
-  // won't persist across container restarts.
+  // Fires when RemoteAuth successfully writes the session to MongoDB.
   client.on("remote_session_saved", () => {
-    logger.info("Remote session saved to MongoDB successfully");
+    log.info("Session token written to MongoDB successfully");
   });
 
   // ── Authentication Failure ──
   client.on("auth_failure", (message) => {
-    logger.error(`WhatsApp authentication failed: ${message}`);
+    log.error(`Authentication failed: ${message}`);
     isReady = false;
   });
 
   // ── Ready ──
-  client.on("ready", () => {
+  client.on("ready", async () => {
     isReady = true;
     latestQR = null;
-    logger.info("WhatsApp client is ready and connected");
+    log.info("Client is ready and connected");
+    await enableResourceBlocking();
     startHeartbeat();
   });
 
@@ -130,22 +185,62 @@ async function initialize(store) {
   client.on("disconnected", (reason) => {
     isReady = false;
     stopHeartbeat();
-    logger.warn(`WhatsApp client disconnected: ${reason}`);
-    logger.info("Attempting to reconnect in 10 seconds...");
+    log.warn(`Client disconnected: ${reason}`);
+    log.info("Attempting to reconnect in 10 seconds...");
 
-    // Auto-reconnect after a brief delay
     setTimeout(async () => {
       try {
+        log.info("Reconnection attempt initiated...");
         await client.initialize();
-        logger.info("Reconnection attempt initiated");
+        log.info("Reconnection attempt completed");
       } catch (err) {
-        logger.error(`Reconnection failed: ${err.message}`);
+        log.error(`Reconnection failed: ${err.message}`);
       }
     }, 10000);
   });
 
-  logger.info("Initializing WhatsApp client with RemoteAuth...");
+  log.info("Initializing client with RemoteAuth + /tmp workspace...");
   await client.initialize();
+}
+
+// ─────────────────────────────────────────────────────
+// RESOURCE BLOCKING — Reduce memory on free-tier
+// ─────────────────────────────────────────────────────
+
+/**
+ * Enable request interception to block heavy resources.
+ *
+ * Stops stylesheets, images, fonts, audio, and media from loading
+ * in the headless browser. WhatsApp Web messaging works without
+ * these resources, and blocking them can save 100-200MB of RAM
+ * on free-tier containers.
+ */
+async function enableResourceBlocking() {
+  try {
+    if (!client || !client.pupPage) return;
+
+    await client.pupPage.setRequestInterception(true);
+
+    const BLOCKED_TYPES = new Set([
+      "stylesheet",
+      "image",
+      "media",
+      "font",
+      "other",
+    ]);
+
+    client.pupPage.on("request", (request) => {
+      if (BLOCKED_TYPES.has(request.resourceType())) {
+        request.abort();
+      } else {
+        request.continue();
+      }
+    });
+
+    log.info("Resource blocking enabled (stylesheets, images, fonts, media)");
+  } catch (err) {
+    log.warn(`Failed to enable resource blocking: ${err.message}`);
+  }
 }
 
 // ─────────────────────────────────────────────────────
@@ -154,34 +249,27 @@ async function initialize(store) {
 
 /**
  * Start the heartbeat loop.
- *
- * Pings the browser page context at a regular interval to
- * prevent cloud platforms (Render, Railway) from freezing
- * the headless Chrome process during idle periods.
- *
- * Without this, the browser session dies after ~5-15 minutes
- * of inactivity on most free-tier cloud services.
+ * Pings the browser page context at a regular interval to prevent
+ * cloud platforms from freezing the headless Chrome process.
  */
 function startHeartbeat() {
-  stopHeartbeat(); // Clear any existing interval
+  stopHeartbeat();
 
   heartbeatInterval = setInterval(async () => {
     try {
       if (client && client.pupPage) {
-        // Evaluate a trivial expression in the browser context
-        // to keep the page alive and prevent idle timeout
-        await client.pupPage.evaluate(() => {
-          return document.title;
-        });
-        logger.info("Heartbeat: browser page is alive");
+        const title = await client.pupPage.evaluate(() => document.title);
+        hbLog.info(`Ping OK — page alive (title: "${title}")`);
+      } else {
+        hbLog.warn("No browser page available");
       }
     } catch (err) {
-      logger.warn(`Heartbeat failed: ${err.message}`);
+      hbLog.warn(`Ping failed: ${err.message}`);
     }
   }, config.heartbeatIntervalMs);
 
-  logger.info(
-    `Heartbeat engine started (interval: ${config.heartbeatIntervalMs / 1000}s)`
+  hbLog.info(
+    `Engine started (interval: ${config.heartbeatIntervalMs / 1000}s)`
   );
 }
 
@@ -192,7 +280,7 @@ function stopHeartbeat() {
   if (heartbeatInterval) {
     clearInterval(heartbeatInterval);
     heartbeatInterval = null;
-    logger.info("Heartbeat engine stopped");
+    hbLog.info("Engine stopped");
   }
 }
 
@@ -203,7 +291,7 @@ function stopHeartbeat() {
 /**
  * Send a WhatsApp message.
  *
- * @param {string} number  — Phone number in international format (digits only)
+ * @param {string} number  — Phone number (digits only, international)
  * @param {string} message — Text content to send
  * @returns {Promise<object>} — whatsapp-web.js message response
  */
@@ -215,10 +303,10 @@ async function sendMessage(number, message) {
   }
 
   const chatId = `${number}@c.us`;
-  logger.info(`Sending message to ${number}`);
+  log.info(`Sending message to ${number}`);
 
   const response = await client.sendMessage(chatId, message);
-  logger.info(`Message sent to ${number} (id: ${response.id._serialized})`);
+  log.info(`Message sent to ${number} (id: ${response.id._serialized})`);
 
   return response;
 }
