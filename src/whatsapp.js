@@ -5,6 +5,8 @@
  * No database, no cloud — survives restarts as long as the folder exists.
  */
 
+const path = require("path");
+const fs = require("fs");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcodeTerminal = require("qrcode-terminal");
 const { config } = require("./config");
@@ -28,12 +30,24 @@ let latestQR = null;
  * @returns {Promise<void>}
  */
 async function initialize() {
+  const dataPath = path.join(__dirname, "../.wwebjs_auth");
+  const sessionPath = path.join(dataPath, "session-my-stable-session");
+
+  log.info(`Checking session folder at: ${sessionPath}`);
+  if (fs.existsSync(sessionPath)) {
+    log.info(`Existing session files detected at ${sessionPath}. Restoring session...`);
+  } else {
+    log.info(`No existing session files found. Initiating new login QR generation...`);
+  }
+
   log.info("Initializing WhatsApp client with LocalAuth...");
   log.info(`Chrome: ${config.chromePath}`);
+  log.info(`Using session directory: ${sessionPath}`);
 
   client = new Client({
     authStrategy: new LocalAuth({
       clientId: "my-stable-session",
+      dataPath: dataPath,
     }),
     puppeteer: {
       headless: true,
@@ -45,6 +59,16 @@ async function initialize() {
         "--disable-gpu",
       ],
     },
+  });
+
+  // ── Loading Screen ──
+  client.on("loading_screen", (percent, message) => {
+    log.info(`Loading screen: ${percent}% - ${message}`);
+  });
+
+  // ── State Change ──
+  client.on("change_state", (state) => {
+    log.info(`State changed to: ${state}`);
   });
 
   // ── QR Code ──
