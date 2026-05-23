@@ -1,13 +1,18 @@
 {
   "name": "whatsapp-local-bridge",
-  "version": "3.0.0",
-  "description": "Local WhatsApp automation bridge — Express API + whatsapp-web.js + MongoDB Atlas session persistence",
+  "version": "4.0.0",
+  "description": "Local WhatsApp automation bridge — Express API + whatsapp-web.js + LocalAuth file-based sessions",
   "main": "bridge.js",
   "scripts": {
     "start": "node bridge.js",
     "dev": "node --watch bridge.js"
   },
-  "keywords": ["whatsapp", "automation", "onboarding", "local"],
+  "keywords": [
+    "whatsapp",
+    "automation",
+    "onboarding",
+    "local"
+  ],
   "author": "",
   "license": "ISC",
   "engines": {
@@ -16,11 +21,9 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "mongoose": "^8.9.5",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.26.1-alpha.3",
-    "wwebjs-mongo": "^1.1.0",
     "winston": "^3.17.0"
   }
 }

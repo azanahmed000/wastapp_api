@@ -3,14 +3,13 @@
  *
  * POST /send-message  — Send a WhatsApp message (API key required)
  * GET  /qr            — Render QR code as a scannable HTML page
- * GET  /status        — Connection status with DB session verification
+ * GET  /status        — Client connection status (no DB calls)
  * GET  /health        — Server health check
  */
 
 const { Router } = require("express");
 const QRCode = require("qrcode");
 const whatsapp = require("./whatsapp");
-const { verifySessionInDB } = require("./store");
 const { authenticateApiKey, validateMessage } = require("./middleware");
 const logger = require("./logger");
 
@@ -45,7 +44,7 @@ router.get("/qr", async (req, res) => {
     const ready = whatsapp.getStatus();
     const statusMessage = ready
       ? "WhatsApp is already authenticated. No QR code needed."
-      : "No QR code available yet — the client is still initializing. Refresh in a few seconds.";
+      : "No QR code available yet — client is still initializing. Refresh in a few seconds.";
 
     return res.status(200).send(`
       <!DOCTYPE html>
@@ -124,24 +123,15 @@ router.get("/qr", async (req, res) => {
   }
 });
 
-// ── GET /status ──
-router.get("/status", async (req, res) => {
-  const clientReady = whatsapp.getStatus();
-  const dbSession = await verifySessionInDB();
-
+// ── GET /status — Simple ready check, no database calls ──
+router.get("/status", (req, res) => {
+  const ready = whatsapp.getStatus();
   return res.status(200).json({
     success: true,
-    ready: clientReady,
-    session: {
-      existsInDB: dbSession.exists,
-      lastModified: dbSession.lastModified,
-      collection: dbSession.collection,
-    },
-    message: clientReady
+    ready,
+    message: ready
       ? "WhatsApp client is connected and ready."
-      : dbSession.exists
-        ? "Client is reconnecting — session token found in database."
-        : "WhatsApp client is NOT ready. Scan the QR code in the terminal or visit /qr.",
+      : "WhatsApp client is NOT ready. Scan the QR code in the terminal or visit /qr.",
   });
 });
 

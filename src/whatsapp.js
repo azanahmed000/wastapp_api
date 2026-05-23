@@ -1,24 +1,11 @@
 /**
- * whatsapp.js — WhatsApp client for local execution
+ * whatsapp.js — WhatsApp client with LocalAuth (file-based sessions)
  *
- * PURPOSE:
- *   Core WhatsApp integration optimized for running on a local machine:
- *
- *   1. RemoteAuth + MongoDB Atlas: Session persists in the cloud DB
- *      so it survives restarts. No local filesystem session caching
- *      needed — whatsapp-web.js handles its own internal paths.
- *
- *   2. Terminal QR display: Prints the QR code directly in the
- *      terminal using qrcode-terminal for instant local scanning.
- *
- *   3. HTTP QR display: Also stores the QR in memory so the /qr
- *      endpoint can render it for remote scanning if needed.
- *
- *   4. Standard Puppeteer config: Uses the local Chrome installation
- *      with minimal stability flags — no aggressive cloud stripping.
+ * Session tokens are saved to .wwebjs_auth/ on the local hard drive.
+ * No database, no cloud — survives restarts as long as the folder exists.
  */
 
-const { Client, RemoteAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcodeTerminal = require("qrcode-terminal");
 const { config } = require("./config");
 const logger = require("./logger");
@@ -28,26 +15,25 @@ const log = logger.tagged("[WhatsApp Gateway]");
 /** @type {Client|null} */
 let client = null;
 
-/** Tracks whether the client is authenticated and ready */
+/** Whether the client is authenticated and ready to send messages */
 let isReady = false;
 
-/** Stores the latest QR code string for the /qr HTTP endpoint */
+/** Latest QR string for the /qr HTTP endpoint */
 let latestQR = null;
 
 /**
- * Initialize the WhatsApp client with RemoteAuth.
+ * Initialize the WhatsApp client with LocalAuth.
+ * Session data is saved to .wwebjs_auth/session-my-stable-session/
  *
- * @param {import('wwebjs-mongo').MongoStore} store — MongoStore instance
  * @returns {Promise<void>}
  */
-async function initialize(store) {
-  log.info("Initializing WhatsApp client...");
-  log.info(`Using Chrome at: ${config.chromePath}`);
+async function initialize() {
+  log.info("Initializing WhatsApp client with LocalAuth...");
+  log.info(`Chrome: ${config.chromePath}`);
 
   client = new Client({
-    authStrategy: new RemoteAuth({
-      store,
-      backupSyncIntervalMs: 60000, // Save session to MongoDB every 60 seconds
+    authStrategy: new LocalAuth({
+      clientId: "my-stable-session",
     }),
     puppeteer: {
       headless: true,
@@ -61,61 +47,37 @@ async function initialize(store) {
     },
   });
 
-  // Track whether the session has been saved to MongoDB
-  let sessionSavedToDB = false;
-
-  // ── QR Code Event ──
-  // Prints QR directly in terminal AND stores it for the /qr HTTP endpoint.
+  // ── QR Code ──
+  // Prints directly in the terminal for instant scanning.
   client.on("qr", (qr) => {
     latestQR = qr;
-    log.info("QR code received — scan it below or visit /qr in your browser:");
-    console.log(""); // blank line for readability
+    log.info("QR code received — scan it below or visit http://localhost:3000/qr");
+    console.log("");
     qrcodeTerminal.generate(qr, { small: true });
-    console.log(""); // blank line after QR
+    console.log("");
   });
 
   // ── Authenticated ──
   client.on("authenticated", () => {
     log.info("══════════════════════════════════════════");
-    log.info("  Client authenticated successfully");
+    log.info("  Client authenticated — session saved to disk");
     log.info("══════════════════════════════════════════");
     latestQR = null;
-
-    // Fallback: verify session was saved within 10 seconds
-    setTimeout(async () => {
-      if (!sessionSavedToDB) {
-        log.warn("remote_session_saved has NOT fired yet — checking MongoDB...");
-        const { verifySessionInDB } = require("./store");
-        const result = await verifySessionInDB();
-        if (result.exists) {
-          log.info("DB check: Session found in MongoDB ✓");
-        } else {
-          log.error("DB check: Session NOT found — RemoteAuth may have failed to save");
-        }
-      }
-    }, 10000);
   });
 
-  // ── Remote Session Saved ──
-  client.on("remote_session_saved", () => {
-    sessionSavedToDB = true;
-    log.info("══════════════════════════════════════════");
-    log.info("  Session saved to MongoDB Atlas ✓");
-    log.info("══════════════════════════════════════════");
-  });
-
-  // ── Authentication Failure ──
+  // ── Auth failure ──
   client.on("auth_failure", (message) => {
     log.error(`Authentication failed: ${message}`);
     isReady = false;
-    sessionSavedToDB = false;
   });
 
   // ── Ready ──
   client.on("ready", () => {
     isReady = true;
     latestQR = null;
-    log.info("Client is ready and connected — messages can be sent");
+    log.info("══════════════════════════════════════════");
+    log.info("  Client READY — messages can be sent");
+    log.info("══════════════════════════════════════════");
   });
 
   // ── Disconnected ──
@@ -136,10 +98,6 @@ async function initialize(store) {
 
   await client.initialize();
 }
-
-// ─────────────────────────────────────────────────────
-// PUBLIC API
-// ─────────────────────────────────────────────────────
 
 /**
  * Send a WhatsApp message.
@@ -168,9 +126,4 @@ function getLatestQR() {
   return latestQR;
 }
 
-module.exports = {
-  initialize,
-  sendMessage,
-  getStatus,
-  getLatestQR,
-};
+module.exports = { initialize, sendMessage, getStatus, getLatestQR };

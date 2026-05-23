@@ -1,21 +1,18 @@
 /**
- * bridge.js — Application entry point (local execution)
+ * bridge.js — Application entry point
  *
- * PURPOSE:
- *   Single-command startup: `npm start`
+ * Single command: npm start
  *
- *   Boot sequence:
- *     1. Register process handlers (prevent crashes)
- *     2. Validate .env configuration
- *     3. Connect to MongoDB Atlas
- *     4. Start Express HTTP server
- *     5. Initialize WhatsApp client (QR prints in terminal)
+ * Boot sequence:
+ *   1. Register process handlers
+ *   2. Validate .env
+ *   3. Start Express HTTP server
+ *   4. Initialize WhatsApp client (QR prints in terminal)
  */
 
 const express = require("express");
 const { config, validateConfig } = require("./src/config");
 const logger = require("./src/logger");
-const { connectAndCreateStore } = require("./src/store");
 const whatsapp = require("./src/whatsapp");
 const routes = require("./src/routes");
 
@@ -42,18 +39,14 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
-// ── Application startup ──
+// ── Startup ──
 async function start() {
   try {
-    // Step 1: Validate config
     log.info("Validating .env configuration...");
     validateConfig();
     log.info("Configuration OK");
 
-    // Step 2: Connect to MongoDB
-    const store = await connectAndCreateStore();
-
-    // Step 3: Start Express (so /qr is available immediately)
+    // Start Express first so /qr is available during WhatsApp init
     const app = express();
     app.use(express.json());
 
@@ -81,7 +74,6 @@ async function start() {
       log.info("  WhatsApp Local Bridge — ONLINE");
       log.info("═══════════════════════════════════════════");
       log.info(`  Server:  http://localhost:${config.port}`);
-      log.info(`  Env:     ${config.nodeEnv}`);
       log.info("  Endpoints:");
       log.info("    POST /send-message  (API key required)");
       log.info("    GET  /qr            (browser QR scan)");
@@ -90,8 +82,8 @@ async function start() {
       log.info("═══════════════════════════════════════════");
     });
 
-    // Step 4: Initialize WhatsApp (QR prints in terminal)
-    await whatsapp.initialize(store);
+    // Initialize WhatsApp — QR prints in terminal
+    await whatsapp.initialize();
   } catch (error) {
     log.error(`Fatal startup error: ${error.message}`);
     if (error.stack) log.error(error.stack);
