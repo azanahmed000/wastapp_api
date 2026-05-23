@@ -1,21 +1,15 @@
 /**
- * logger.js — Structured logging utility with prefix tags
+ * logger.js — Structured logging with prefix tags
  *
  * PURPOSE:
- *   Pre-configured Winston logger for cloud environments with
- *   structured prefix tags for tracking explicit milestones:
- *
- *   [WhatsApp Gateway]       — Client lifecycle events
- *   [Database Connection]    — MongoDB connection events
- *   [HTTP Server]            — Express request/response logs
- *   [Security]               — Auth and validation events
- *   [Heartbeat]              — Browser keepalive pings
- *
- *   Logs only to console (stdout/stderr) since cloud platforms
- *   like Render and Railway capture stdout as their log system.
+ *   Winston logger with tagged prefixes for clean console output:
+ *   [WhatsApp Gateway], [Database], [HTTP Server], [Security], etc.
  */
 
 const { createLogger, format, transports } = require("winston");
+const path = require("path");
+
+const LOG_DIR = path.join(__dirname, "../logs");
 
 const logger = createLogger({
   level: "info",
@@ -37,27 +31,28 @@ const logger = createLogger({
         })
       ),
     }),
+    new transports.File({
+      filename: path.join(LOG_DIR, "error.log"),
+      level: "error",
+    }),
+    new transports.File({
+      filename: path.join(LOG_DIR, "combined.log"),
+    }),
   ],
 });
 
 /**
  * Create a tagged logger that prepends a prefix to every message.
  *
- * Usage:
- *   const log = require('./logger').tagged('[WhatsApp Gateway]');
- *   log.info('Client is ready'); // → "2026-05-22 ... [WhatsApp Gateway] Client is ready"
- *
- * @param {string} tag — Prefix tag like '[WhatsApp Gateway]'
- * @returns {{ info, warn, error }} — Tagged logger methods
+ * @param {string} tag — e.g. '[WhatsApp Gateway]'
+ * @returns {{ info, warn, error }}
  */
 function tagged(tag) {
   return {
     info: (msg) => logger.info(`${tag} ${msg}`),
     warn: (msg) => logger.warn(`${tag} ${msg}`),
     error: (msg, err) =>
-      err
-        ? logger.error(`${tag} ${msg}`, err)
-        : logger.error(`${tag} ${msg}`),
+      err ? logger.error(`${tag} ${msg}`, err) : logger.error(`${tag} ${msg}`),
   };
 }
 

@@ -1,13 +1,13 @@
 {
-  "name": "whatsapp-cloud-bridge",
-  "version": "2.0.0",
-  "description": "Cloud-deployable WhatsApp onboarding bridge with RemoteAuth, MongoDB session persistence, and remote QR scanning",
+  "name": "whatsapp-local-bridge",
+  "version": "3.0.0",
+  "description": "Local WhatsApp automation bridge — Express API + whatsapp-web.js + MongoDB Atlas session persistence",
   "main": "bridge.js",
   "scripts": {
     "start": "node bridge.js",
     "dev": "node --watch bridge.js"
   },
-  "keywords": ["whatsapp", "automation", "cloud", "onboarding"],
+  "keywords": ["whatsapp", "automation", "onboarding", "local"],
   "author": "",
   "license": "ISC",
   "engines": {
@@ -18,6 +18,7 @@
     "express": "^4.21.2",
     "mongoose": "^8.9.5",
     "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.26.1-alpha.3",
     "wwebjs-mongo": "^1.1.0",
     "winston": "^3.17.0"
